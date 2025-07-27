@@ -12,18 +12,18 @@ class InstrumentoController extends Controller
     {
         $query = Instrumento::query();
 
-        if ($request->has('TckrSymb')) {
+        if ($request->filled('TckrSymb')) {
             $query->where('TckrSymb', $request->input('TckrSymb'));
         }
 
-        if ($request->has('RptDt')) {
+        if ($request->filled('RptDt')) {
             $query->where('RptDt', $request->input('RptDt'));
         }
 
-        // Paginação com 20 por página por padrão
+        // Paginação (20 por página por padrão)
         $resultados = $query->paginate(20);
 
-        // Formata os resultados
+        // Transforma os resultados
         $resultados->getCollection()->transform(function ($item) {
             return [
                 'TckrSymb' => $item->TckrSymb,

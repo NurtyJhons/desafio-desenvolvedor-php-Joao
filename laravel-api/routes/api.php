@@ -5,5 +5,6 @@ use App\Http\Controllers\Api\InstrumentoController;
 
 Route::post('/upload', [UploadController::class, 'upload']);
 Route::get('/uploads', [UploadController::class, 'historico']);
+Route::delete('/upload/{id}', [UploadController::class, 'apagar']);
 
 Route::get('/instrumentos_buscar', [InstrumentoController::class, 'buscar']);

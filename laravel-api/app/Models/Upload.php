@@ -13,6 +13,7 @@ class Upload extends Model
         'filename',
         'hash',
         'uploaded_at',
+        'caminho',
     ];
 
     public function instrumentos()

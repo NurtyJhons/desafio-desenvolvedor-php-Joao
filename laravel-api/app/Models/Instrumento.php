@@ -17,6 +17,11 @@ class Instrumento extends Model
         'SctyCtgyNm',
         'ISIN',
         'CrpnNm',
+        'dados_json',
+    ];
+
+    protected $casts = [
+        'RptDt' => 'date',
     ];
 
     public function upload()
