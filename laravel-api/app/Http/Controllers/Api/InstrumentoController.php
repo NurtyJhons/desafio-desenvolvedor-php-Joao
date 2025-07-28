@@ -4,7 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
-use App\Models\Instrumento;
+use App\Models\InstrumentoNoSql; 
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
@@ -16,15 +16,14 @@ class InstrumentoController extends Controller
         $rptdt = $request->input('RptDt', '');
         $pagina = $request->input('page', 1);
 
-        // Criar chave única para esta consulta específica
-        $cacheKey = "instrumentos_buscar_" . md5($tckr . $rptdt . $pagina);
+        $cacheKey = "instrumentos_buscar_mongodb_" . md5($tckr . $rptdt . $pagina);
 
         Log::info("🔍 Buscando cache com chave: {$cacheKey}");
 
         $resultados = Cache::remember($cacheKey, 60, function () use ($tckr, $rptdt) {
-            Log::info('🔄 Cache MISS: consultando o banco de dados [instrumentos_buscar]');
+            Log::info('🔄 Cache MISS: consultando o MongoDB [instrumentos_buscar]');
             
-            $query = Instrumento::query();
+            $query = InstrumentoNoSql::query(); // ← MongoDB
 
             if (!empty($tckr)) {
                 $query->where('TckrSymb', $tckr);
@@ -34,7 +33,6 @@ class InstrumentoController extends Controller
                 $query->where('RptDt', $rptdt);
             }
 
-            // IMPORTANTE: Paginação precisa ser feita DENTRO da closure
             $resultados = $query->paginate(20);
             
             Log::info("📊 Consulta executada - Total encontrado: {$resultados->total()}");
@@ -42,21 +40,21 @@ class InstrumentoController extends Controller
             return $resultados;
         });
 
-        // Se veio do cache, loga isso
         if (Cache::has($cacheKey)) {
             Log::info('✅ Cache HIT: dados vindos do Redis');
         }
 
-        // Transforma os resultados mantendo a estrutura de paginação
         $resultados->getCollection()->transform(function ($item) {
             return [
                 'RptDt' => $item->RptDt,
-                'TckrSymb' => $item->TckrSymb,
+                'TckrSymb' => $item->TckrSymb,  
                 'MktNm' => $item->MktNm,
                 'SctyCtgyNm' => $item->SctyCtgyNm,
                 'ISIN' => $item->ISIN,
                 'CrpnNm' => $item->CrpnNm,
-                'dados_completos' => json_decode($item->dados_json, true),
+                'dados_completos' => is_string($item->dados_json) 
+                    ? json_decode($item->dados_json, true) 
+                    : $item->dados_json,
             ];
         });
 
