@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
 use App\Models\Upload;
 use App\Models\Instrumento;
 use App\Jobs\ProcessarCsvJob;
@@ -62,17 +63,38 @@ class UploadController extends Controller
 
     public function historico(Request $request)
     {
-        $query = Upload::query();
+        $nome = $request->input('nome', '');
+        $data = $request->input('data', '');
 
-        if ($request->has('nome')) {
-            $query->where('filename', 'like', '%' . $request->input('nome') . '%');
+        // Criar chave única baseada nos parâmetros
+        $cacheKey = "uploads_historico_" . md5($nome . $data);
+
+        Log::info("🔍 Buscando histórico com cache key: {$cacheKey}");
+
+        $uploads = Cache::remember($cacheKey, 60, function () use ($nome, $data) {
+            Log::info('🔄 Cache MISS: consultando o banco de dados [historico_uploads]');
+
+            $query = Upload::query();
+
+            if (!empty($nome)) {
+                $query->where('filename', 'like', "%{$nome}%");
+            }
+
+            if (!empty($data)) {
+                $query->whereDate('uploaded_at', $data);
+            }
+
+            $resultado = $query->orderBy('uploaded_at', 'desc')->get();
+            
+            Log::info("📊 Histórico consultado - Total encontrado: {$resultado->count()}");
+            
+            return $resultado;
+        });
+
+        // Verifica se veio do cache
+        if (Cache::has($cacheKey)) {
+            Log::info('✅ Cache HIT: histórico vindo do Redis');
         }
-
-        if ($request->has('data')) {
-            $query->whereDate('uploaded_at', $request->input('data'));
-        }
-
-        $uploads = $query->orderBy('uploaded_at', 'desc')->get();
 
         return response()->json($uploads);
     }
