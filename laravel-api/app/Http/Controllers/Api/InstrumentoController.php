@@ -6,7 +6,6 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use App\Models\InstrumentoNoSql; 
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Log;
 
 class InstrumentoController extends Controller
 {
@@ -15,15 +14,12 @@ class InstrumentoController extends Controller
         $tckr = $request->input('TckrSymb', '');
         $rptdt = $request->input('RptDt', '');
         $pagina = $request->input('page', 1);
+        $itensPorPagina = min($request->input('per_page', 50), 500);
 
-        $cacheKey = "instrumentos_buscar_mongodb_" . md5($tckr . $rptdt . $pagina);
+        $cacheKey = "instrumentos_buscar_mongodb_" . md5($tckr . $rptdt . $pagina . $itensPorPagina);
 
-        Log::info("🔍 Buscando cache com chave: {$cacheKey}");
-
-        $resultados = Cache::remember($cacheKey, 60, function () use ($tckr, $rptdt) {
-            Log::info('🔄 Cache MISS: consultando o MongoDB [instrumentos_buscar]');
-            
-            $query = InstrumentoNoSql::query(); // ← MongoDB
+        $resultados = Cache::remember($cacheKey, 60, function () use ($tckr, $rptdt, $itensPorPagina) {
+            $query = InstrumentoNoSql::query();
 
             if (!empty($tckr)) {
                 $query->where('TckrSymb', $tckr);
@@ -33,16 +29,8 @@ class InstrumentoController extends Controller
                 $query->where('RptDt', $rptdt);
             }
 
-            $resultados = $query->paginate(20);
-            
-            Log::info("📊 Consulta executada - Total encontrado: {$resultados->total()}");
-            
-            return $resultados;
+            return $query->paginate($itensPorPagina);
         });
-
-        if (Cache::has($cacheKey)) {
-            Log::info('✅ Cache HIT: dados vindos do Redis');
-        }
 
         $resultados->getCollection()->transform(function ($item) {
             return [

@@ -2,7 +2,6 @@
 
 namespace App\Jobs;
 
-use App\Models\Instrumento;
 use App\Models\InstrumentoNoSql;
 use App\Models\UploadNoSql;
 use Illuminate\Bus\Queueable;
@@ -12,6 +11,7 @@ use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Cache;
 use Carbon\Carbon;
 
 class ProcessarCsvJob implements ShouldQueue
@@ -29,184 +29,196 @@ class ProcessarCsvJob implements ShouldQueue
 
     public function handle()
     {
-        Log::info("Job iniciado para Upload ID: {$this->uploadId}");
-
-        // Verifica se o upload existe no MongoDB
         $upload = UploadNoSql::find($this->uploadId);
         if (!$upload) {
-            Log::error("Upload não encontrado no MongoDB: {$this->uploadId}");
+            Log::error("Upload não encontrado: {$this->uploadId}");
             return;
         }
 
         $handle = Storage::disk('local')->readStream($this->caminhoArquivo);
         if (!$handle) {
-            Log::error("Não foi possível abrir o arquivo: {$this->caminhoArquivo}");
+            Log::error("Erro ao abrir arquivo: {$this->caminhoArquivo}");
             return;
         }
 
         $header = null;
         $batch = [];
-        $batchMongoDB = [];
-        $batchSize = 500;
         $linhaAtual = 0;
         $totalInseridos = 0;
 
         while (($linha = fgetcsv($handle, 10000, ';')) !== false) {
             $linhaAtual++;
 
-            if ($linhaAtual == 1 || empty($linha[0]) || trim($linha[0]) == '') {
-                continue;
-            }
+            // Pula linha vazia ou primeira linha
+            if ($linhaAtual == 1 || empty(trim($linha[0] ?? ''))) continue;
 
+            // Processa header na linha 2
             if ($linhaAtual == 2) {
-                if (count($linha) == 1 && strpos($linha[0], ';') !== false) {
-                    $header = array_map('trim', explode(';', $linha[0]));
-                } else {
-                    $header = array_map('trim', $linha);
-                }
-                Log::info("Header encontrado: " . implode(', ', $header));
+                $header = $this->processarHeader($linha);
                 continue;
             }
 
-            if (!$header || empty(trim($linha[0]))) {
-                continue;
-            }
+            if (!$header) continue;
 
-            if (count($linha) == 1 && strpos($linha[0], ';') !== false) {
-                $linha = explode(';', $linha[0]);
-            }
+            // Processa linha de dados
+            $registro = $this->processarLinha($linha, $header, $linhaAtual);
+            if (!$registro) continue;
 
-            if (count($linha) != count($header)) {
-                Log::warning("Linha {$linhaAtual} inválida - Header: " . count($header) . " colunas, Linha: " . count($linha) . " colunas");
-                continue;
-            }
+            $batch[] = $this->criarRegistroMongoDB($registro);
 
-            $registro = array_combine($header, array_map('trim', $linha));
-
-            // Conversão de data
-            $dataFormatada = null;
-            if (!empty($registro['RptDt'])) {
-                try {
-                    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $registro['RptDt'])) {
-                        $dataFormatada = Carbon::createFromFormat('Y-m-d', $registro['RptDt']);
-                    } else {
-                        $dataFormatada = Carbon::createFromFormat('d/m/Y', $registro['RptDt']);
-                    }
-                } catch (\Exception $e) {
-                    Log::warning("Erro ao converter data na linha {$linhaAtual}: " . $registro['RptDt'] . " - " . $e->getMessage());
-                    $dataFormatada = null;
-                }
-            }
-
-            // Para MySQL
-            $batch[] = [
-                'upload_id' => $this->uploadId,
-                'RptDt' => $dataFormatada ? $dataFormatada->format('Y-m-d') : null,
-                'TckrSymb' => $registro['TckrSymb'] ?? null,
-                'MktNm' => $registro['MktNm'] ?? null,
-                'SctyCtgyNm' => $registro['SctyCtgyNm'] ?? null,
-                'ISIN' => $registro['ISIN'] ?? null,
-                'CrpnNm' => $registro['CrpnNm'] ?? null,
-                'dados_json' => json_encode($registro),
-                'created_at' => now(),
-                'updated_at' => now(),
-            ];
-
-            // Para MongoDB
-            $batchMongoDB[] = [
-                'upload_id' => $this->uploadId,
-                'RptDt' => $dataFormatada ? $dataFormatada->toDateString() : null,
-                'TckrSymb' => $registro['TckrSymb'] ?? null,
-                'MktNm' => $registro['MktNm'] ?? null,
-                'SctyCtgyNm' => $registro['SctyCtgyNm'] ?? null,
-                'ISIN' => $registro['ISIN'] ?? null,
-                'CrpnNm' => $registro['CrpnNm'] ?? null,
-                'dados_json' => $registro,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ];
-
-            if (count($batch) >= $batchSize) {
-                try {
-                    // Insert no MySQL
-                    if (!empty($batch)) {
-                        Instrumento::insert($batch);
-                    }
-                    
-                    // Insert no MongoDB - usando insertMany para melhor performance
-                    if (!empty($batchMongoDB)) {
-                        $collection = InstrumentoNoSql::raw(function($collection) use ($batchMongoDB) {
-                            return $collection->insertMany($batchMongoDB);
-                        });
-                        $totalInseridos += count($batchMongoDB);
-                    }
-                    
-                    Log::info("Lote inserido: " . count($batch) . " registros (Total MongoDB: {$totalInseridos})");
-                    
-                } catch (\Exception $e) {
-                    Log::error("Erro ao inserir lote: " . $e->getMessage());
-                    Log::error("Stack trace: " . $e->getTraceAsString());
-                    
-                    // Tenta inserir um por um no MongoDB se falhar em batch
-                    if (!empty($batchMongoDB)) {
-                        foreach ($batchMongoDB as $item) {
-                            try {
-                                InstrumentoNoSql::create($item);
-                                $totalInseridos++;
-                            } catch (\Exception $itemError) {
-                                Log::error("Erro ao inserir item individual no MongoDB: " . $itemError->getMessage());
-                            }
-                        }
-                    }
-                }
+            // Processa lote quando atingir 500 registros
+            if (count($batch) >= 500) {
+                $totalInseridos += $this->inserirLote($batch);
                 $batch = [];
-                $batchMongoDB = [];
             }
         }
 
-        // Processa o último lote
+        // Processa último lote
         if (!empty($batch)) {
-            try {
-                // Insert no MySQL
-                Instrumento::insert($batch);
-                
-                // Insert no MongoDB
-                if (!empty($batchMongoDB)) {
-                    $collection = InstrumentoNoSql::raw(function($collection) use ($batchMongoDB) {
-                        return $collection->insertMany($batchMongoDB);
-                    });
-                    $totalInseridos += count($batchMongoDB);
-                }
-                
-                Log::info("Último lote inserido: " . count($batch) . " registros (Total MongoDB: {$totalInseridos})");
-                
-            } catch (\Exception $e) {
-                Log::error("Erro ao inserir último lote: " . $e->getMessage());
-                
-                // Tenta inserir um por um no MongoDB se falhar em batch
-                if (!empty($batchMongoDB)) {
-                    foreach ($batchMongoDB as $item) {
-                        try {
-                            InstrumentoNoSql::create($item);
-                            $totalInseridos++;
-                        } catch (\Exception $itemError) {
-                            Log::error("Erro ao inserir item individual no MongoDB: " . $itemError->getMessage());
-                        }
-                    }
-                }
-            }
+            $totalInseridos += $this->inserirLote($batch);
         }
 
         fclose($handle);
         
-        // Verifica quantos registros foram inseridos
-        $countMongoDB = InstrumentoNoSql::where('upload_id', $this->uploadId)->count();
+        // Log final apenas com informações essenciais
+        if ($totalInseridos === 0) {
+            Log::error("Nenhum registro inserido para upload {$this->uploadId}");
+        }
+
+        $this->limparCache();
+    }
+
+    private function processarHeader($linha)
+    {
+        if (count($linha) == 1 && strpos($linha[0], ';') !== false) {
+            $header = explode(';', $linha[0]);
+        } else {
+            $header = $linha;
+        }
         
-        Log::info("Job finalizado para Upload ID: {$this->uploadId}");
-        Log::info("Total de registros inseridos no MongoDB: {$countMongoDB}");
-        
-        if ($countMongoDB == 0) {
-            Log::error("ATENÇÃO: Nenhum registro foi inserido no MongoDB!");
+        return array_map([$this, 'corrigirUtf8'], array_map('trim', $header));
+    }
+
+    private function processarLinha($linha, $header, $numeroLinha)
+    {
+        if (count($linha) == 1 && strpos($linha[0], ';') !== false) {
+            $linha = explode(';', $linha[0]);
+        }
+
+        if (count($linha) != count($header)) return null;
+
+        $linha = array_map([$this, 'corrigirUtf8'], array_map('trim', $linha));
+        return array_combine($header, $linha);
+    }
+
+    private function criarRegistroMongoDB($registro)
+    {
+        return [
+            'upload_id' => $this->uploadId,
+            'RptDt' => $this->formatarData($registro['RptDt'] ?? null),
+            'TckrSymb' => $registro['TckrSymb'] ?? null,
+            'MktNm' => $registro['MktNm'] ?? null,
+            'SctyCtgyNm' => $registro['SctyCtgyNm'] ?? null,
+            'ISIN' => $registro['ISIN'] ?? null,
+            'CrpnNm' => $registro['CrpnNm'] ?? null,
+            'dados_json' => $registro,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ];
+    }
+
+    private function formatarData($data)
+    {
+        if (empty($data)) return null;
+
+        try {
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $data)) {
+                return Carbon::createFromFormat('Y-m-d', $data)->toDateString();
+            } else {
+                return Carbon::createFromFormat('d/m/Y', $data)->toDateString();
+            }
+        } catch (\Exception $e) {
+            return null;
+        }
+    }
+
+    private function inserirLote($batch)
+    {
+        try {
+            InstrumentoNoSql::raw(function($collection) use ($batch) {
+                return $collection->insertMany($batch);
+            });
+            return count($batch);
+        } catch (\Exception $e) {
+            // Fallback: inserir um por um
+            $inseridos = 0;
+            foreach ($batch as $item) {
+                try {
+                    InstrumentoNoSql::create($item);
+                    $inseridos++;
+                } catch (\Exception $itemError) {
+                    // Última tentativa com limpeza de caracteres
+                    try {
+                        $item = $this->limparCaracteres($item);
+                        InstrumentoNoSql::create($item);
+                        $inseridos++;
+                    } catch (\Exception $finalError) {
+                        // Silencioso - apenas não insere este registro
+                    }
+                }
+            }
+            return $inseridos;
+        }
+    }
+
+    private function corrigirUtf8($texto)
+    {
+        if (empty($texto)) return $texto;
+
+        if (!mb_check_encoding($texto, 'UTF-8')) {
+            $texto = mb_convert_encoding($texto, 'UTF-8', 'ISO-8859-1');
+        }
+
+        $substituicoes = [
+            '▒' => 'Ç', '▓' => 'Ã', '┤' => 'Á', '▐' => 'É',
+            '▌' => 'Ê', '▄' => 'Í', '█' => 'Ó', '▀' => 'Ú'
+        ];
+
+        return mb_convert_encoding(
+            str_replace(array_keys($substituicoes), array_values($substituicoes), $texto),
+            'UTF-8', 'UTF-8'
+        );
+    }
+
+    private function limparCaracteres($array)
+    {
+        if (!is_array($array)) {
+            return preg_replace('/[^\x20-\x7E\x{00A0}-\x{00FF}\x{0100}-\x{017F}\x{0180}-\x{024F}]/u', '', $array);
+        }
+
+        $resultado = [];
+        foreach ($array as $chave => $valor) {
+            $chaveCorrigida = preg_replace('/[^\x20-\x7E\x{00A0}-\x{00FF}\x{0100}-\x{017F}\x{0180}-\x{024F}]/u', '', $chave);
+            $resultado[$chaveCorrigida] = is_array($valor) 
+                ? $this->limparCaracteres($valor)
+                : preg_replace('/[^\x20-\x7E\x{00A0}-\x{00FF}\x{0100}-\x{017F}\x{0180}-\x{024F}]/u', '', $valor);
+        }
+
+        return $resultado;
+    }
+
+    private function limparCache()
+    {
+        try {
+            $redis = Cache::getRedis();
+            $prefix = config('database.redis.options.prefix', '');
+            $keys = $redis->keys($prefix . "*instrumentos_buscar_mongodb_*");
+            
+            if (!empty($keys)) {
+                $redis->del($keys);
+            }
+        } catch (\Exception $e) {
+            
         }
     }
 }
